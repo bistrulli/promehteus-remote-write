@@ -235,6 +235,247 @@ def query_metrics():
             'message': str(e)
         }), 500
 
+# --- Custom SYDA K8s Queries ---
+
+def _format_for_grafana(result, target_name):
+    """
+    Format InfluxDB result for Grafana SimpleJSON datasource (time series).
+    """
+    series = []
+    # result.items() gives a tuple of ((measurement, tags), generator)
+    for (measurement, tags), points in result.items():
+        # Create a unique target name from measurement and tags
+        target_label = tags.get(target_name) if target_name and tags else measurement
+        
+        datapoints = []
+        for point in points:
+            # Grafana expects [value, timestamp_ms]
+            value = point.get('value')
+            if value is not None:
+                # Convert timestamp string to epoch milliseconds
+                time_dt = datetime.strptime(point['time'], '%Y-%m-%dT%H:%M:%SZ')
+                timestamp_ms = int(time_dt.timestamp() * 1000)
+                datapoints.append([value, timestamp_ms])
+        
+        if datapoints:
+            series.append({
+                "target": target_label,
+                "datapoints": datapoints
+            })
+    return series
+
+@app.route('/query/arrivals', methods=['GET'])
+def query_arrivals():
+    """
+    Calculates arrival rate based on istio_requests_total.
+    PromQL: sum(increase(istio_requests_total{...}[{window}s]))/{window}
+    """
+    deployment_name = request.args.get('deployment', '.*')
+    namespace = request.args.get('namespace', 'default')
+    window = request.args.get('window', '1m')
+    group_interval = request.args.get('interval', '10s')
+
+    query = f"""
+        SELECT sum("rate") as value
+        FROM (
+            SELECT NON_NEGATIVE_DERIVATIVE(mean("value"), 1s) as rate
+            FROM "istio_requests_total"
+            WHERE "destination_workload" =~ /^{deployment_name}/
+              AND "destination_workload_namespace" = '{namespace}'
+              AND "reporter" = 'destination'
+              AND time > now() - {window}
+            GROUP BY time({group_interval}), "destination_workload"
+        )
+        WHERE time > now() - {window}
+        GROUP BY time({group_interval})
+    """
+    
+    try:
+        logger.info(f"Executing arrivals query: {query.strip()}")
+        result = influx_client.query(query)
+        grafana_data = _format_for_grafana(result, None)
+        return jsonify(grafana_data)
+    except Exception as e:
+        logger.error(f"Error executing arrivals query: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/query/completions', methods=['GET'])
+def query_completions():
+    """
+    Calculates completion rate based on istio_requests_total with response_code 200.
+    PromQL: sum(increase(istio_requests_total{...,response_code="200"}[{window}s]))/{window}
+    """
+    deployment_name = request.args.get('deployment', '.*')
+    namespace = request.args.get('namespace', 'default')
+    window = request.args.get('window', '1m')
+    group_interval = request.args.get('interval', '10s')
+
+    query = f"""
+        SELECT sum("rate") as value
+        FROM (
+            SELECT NON_NEGATIVE_DERIVATIVE(mean("value"), 1s) as rate
+            FROM "istio_requests_total"
+            WHERE "destination_workload" =~ /^{deployment_name}/
+              AND "destination_workload_namespace" = '{namespace}'
+              AND "reporter" = 'destination'
+              AND "response_code" = '200'
+              AND time > now() - {window}
+            GROUP BY time({group_interval}), "destination_workload"
+        )
+        WHERE time > now() - {window}
+        GROUP BY time({group_interval})
+    """
+
+    try:
+        logger.info(f"Executing completions query: {query.strip()}")
+        result = influx_client.query(query)
+        grafana_data = _format_for_grafana(result, None)
+        return jsonify(grafana_data)
+    except Exception as e:
+        logger.error(f"Error executing completions query: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/query/response_time', methods=['GET'])
+def query_response_time():
+    """
+    Calculates response time.
+    PromQL: sum(rate(istio_request_duration_milliseconds_sum{...})) / sum(rate(istio_request_duration_milliseconds_count{...})) / 1000
+    """
+    deployment_name = request.args.get('deployment', '.*')
+    namespace = request.args.get('namespace', 'default')
+    window = request.args.get('window', '1m')
+    group_interval = request.args.get('interval', '10s')
+
+    base_query = """
+        SELECT sum("rate") as value
+        FROM (
+            SELECT NON_NEGATIVE_DERIVATIVE(mean("value"), 1s) as rate
+            FROM "{measurement}"
+            WHERE "destination_workload" =~ /^{deployment_name}/
+              AND "destination_workload_namespace" = '{namespace}'
+              AND time > now() - {window}
+            GROUP BY time({group_interval}), "destination_workload"
+        )
+        WHERE time > now() - {window}
+        GROUP BY time({group_interval})
+    """
+    
+    query_sum = base_query.format(
+        measurement="istio_request_duration_milliseconds_sum",
+        deployment_name=deployment_name,
+        namespace=namespace,
+        window=window,
+        group_interval=group_interval
+    )
+    query_count = base_query.format(
+        measurement="istio_request_duration_milliseconds_count",
+        deployment_name=deployment_name,
+        namespace=namespace,
+        window=window,
+        group_interval=group_interval
+    )
+
+    try:
+        logger.info("Executing response_time (sum) query")
+        result_sum_set = influx_client.query(query_sum)
+        
+        logger.info("Executing response_time (count) query")
+        result_count_set = influx_client.query(query_count)
+
+        # Process results and calculate the final value
+        # We expect one series from each for the overall sum
+        sum_points = list(result_sum_set.get_points()) if result_sum_set else []
+        count_points = list(result_count_set.get_points()) if result_count_set else []
+        
+        # Create a dictionary for quick lookup of count values by time
+        counts_by_time = {p['time']: p['value'] for p in count_points}
+        
+        datapoints = []
+        for p_sum in sum_points:
+            time = p_sum['time']
+            sum_val = p_sum['value']
+            count_val = counts_by_time.get(time)
+
+            if sum_val is not None and count_val is not None and count_val > 0:
+                # Calculate response time and convert from ms to seconds
+                final_value = (sum_val / count_val) / 1000.0
+                time_dt = datetime.strptime(time, '%Y-%m-%dT%H:%M:%SZ')
+                timestamp_ms = int(time_dt.timestamp() * 1000)
+                datapoints.append([final_value, timestamp_ms])
+        
+        grafana_data = [{"target": "response_time", "datapoints": datapoints}]
+        return jsonify(grafana_data)
+
+    except Exception as e:
+        logger.error(f"Error executing response_time query: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/query/cpu_usage', methods=['GET'])
+def query_cpu_usage():
+    """
+    Calculates CPU usage rate per pod.
+    PromQL: sum(rate(container_cpu_usage_seconds_total{...}[{window}s])) by (pod)
+    """
+    deployment_name = request.args.get('deployment', '.*')
+    namespace = request.args.get('namespace', 'default')
+    window = request.args.get('window', '1m')
+    group_interval = request.args.get('interval', '10s')
+
+    query = f"""
+        SELECT sum("rate") as value
+        FROM (
+            SELECT NON_NEGATIVE_DERIVATIVE(mean("value"), 1s) as rate
+            FROM "container_cpu_usage_seconds_total"
+            WHERE "pod" =~ /^{deployment_name}/
+              AND "namespace" = '{namespace}'
+              AND "container" != 'POD' AND "container" != ''
+              AND time > now() - {window}
+            GROUP BY time({group_interval}), "pod"
+        )
+        WHERE time > now() - {window}
+        GROUP BY time({group_interval}), "pod"
+    """
+    
+    try:
+        logger.info(f"Executing cpu_usage query: {query.strip()}")
+        result = influx_client.query(query)
+        # Group results by pod name for the target label
+        grafana_data = _format_for_grafana(result, 'pod')
+        return jsonify(grafana_data)
+    except Exception as e:
+        logger.error(f"Error executing cpu_usage query: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/query/replicas', methods=['GET'])
+def query_replicas():
+    """
+    Counts the number of active pods (replicas).
+    PromQL: count(sum(rate(container_cpu_usage_seconds_total{...}[{window}s])) by (pod))
+    """
+    deployment_name = request.args.get('deployment', '.*')
+    namespace = request.args.get('namespace', 'default')
+    window = request.args.get('window', '1m')
+    group_interval = request.args.get('interval', '10s')
+
+    query = f"""
+        SELECT count(distinct("pod")) as value
+        FROM "container_cpu_usage_seconds_total"
+        WHERE "pod" =~ /^{deployment_name}/
+          AND "namespace" = '{namespace}'
+          AND "container" != 'POD' AND "container" != ''
+          AND time > now() - {window}
+        GROUP BY time({group_interval})
+    """
+    
+    try:
+        logger.info(f"Executing replicas query: {query.strip()}")
+        result = influx_client.query(query)
+        grafana_data = _format_for_grafana(result, None)
+        return jsonify(grafana_data)
+    except Exception as e:
+        logger.error(f"Error executing replicas query: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/', methods=['GET'])
 def index():
     """
