@@ -1,0 +1,43 @@
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  namespace: istio-system
+spec:
+  addonComponents:
+    prometheus:
+      enabled: true
+  values:
+    prometheus:
+      enabled: true
+      # Configurazione per abilitare remote write
+      prometheusSpec:
+        # Abilita remote write
+        remoteWrite:
+          - url: "http://your-backend-url:8000/api/v1/write"
+            remoteTimeout: 30s
+            writeRelabelConfigs:
+              - sourceLabels: [__name__]
+                regex: '.*'
+                action: keep
+        # Configurazione storage
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: ""
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 8Gi
+        # Configurazione risorse
+        resources:
+          requests:
+            memory: 400Mi
+            cpu: 300m
+          limits:
+            memory: 800Mi
+            cpu: 500m
+        # Configurazione retention
+        retention: 15d
+        # Configurazione scraping
+        scrapeInterval: 15s
+        evaluationInterval: 15s 

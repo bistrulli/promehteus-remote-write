@@ -1,0 +1,103 @@
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  namespace: istio-system
+spec:
+  profile: default
+  addonComponents:
+    prometheus:
+      enabled: true
+  components:
+    prometheus:
+      k8s:
+        service:
+          type: LoadBalancer
+          ports:
+            - name: http-prometheus
+              port: 9090
+              targetPort: 9090
+          annotations:
+            cloud.google.com/load-balancer-type: "External"
+        overlays:
+          - kind: ConfigMap
+            name: prometheus
+            patches:
+              - path: data.prometheus\.yml
+                value: |
+                  global:
+                    scrape_interval: 15s
+                    evaluation_interval: 15s
+                  remote_write:
+                    - url: "http://93.47.33.152:8000/api/v1/write"
+                      remote_timeout: 30s
+                      write_relabel_configs:
+                        - source_labels: [__name__]
+                          regex: 'istio_.*|envoy_.*'
+                          action: keep
+                        - source_labels: [__name__]
+                          regex: '.*_debug.*|.*_test.*'
+                          action: drop
+                      queue_config:
+                        capacity: 2500
+                        max_shards: 200
+                        min_shards: 1
+                        max_samples_per_send: 500
+                        batch_send_deadline: 5s
+                        min_backoff: 30ms
+                        max_backoff: 100ms
+                        retry_on_failure: true
+  values:
+    prometheus:
+      enabled: true
+      # Configurazione per abilitare remote write
+      prometheusSpec:
+        # Abilita remote write verso il tuo backend locale
+        remoteWrite:
+          - url: "http://93.47.33.152:8000/api/v1/write"
+            remoteTimeout: 30s
+            writeRelabelConfigs:
+              # Solo metriche Istio e Envoy (più efficiente)
+              - sourceLabels: [__name__]
+                regex: 'istio_.*|envoy_.*'
+                action: keep
+              # Escludi metriche di debug
+              - sourceLabels: [__name__]
+                regex: '.*_debug.*|.*_test.*'
+                action: drop
+        
+        # Configurazione storage persistente
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: "standard"  # Storage class GCP
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 10Gi
+        
+        # Configurazione risorse
+        resources:
+          requests:
+            memory: 400Mi
+            cpu: 300m
+          limits:
+            memory: 800Mi
+            cpu: 500m
+        
+        # Configurazione retention
+        retention: 15d
+        
+        # Configurazione scraping
+        scrapeInterval: 15s
+        evaluationInterval: 15s
+        
+        # Configurazione di resilienza per remote write
+        queueConfig:
+          capacity: 2500
+          maxShards: 200
+          minShards: 1
+          maxSamplesPerSend: 500
+          batchSendDeadline: 5s
+          minBackoff: 30ms
+          maxBackoff: 100ms
+          retryOnFailure: true 

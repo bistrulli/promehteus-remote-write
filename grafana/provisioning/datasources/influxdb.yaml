@@ -1,0 +1,15 @@
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    database: prometheus_metrics
+    user: admin
+    secureJsonData:
+      password: adminpassword
+    jsonData:
+      httpMethod: POST
+      version: InfluxQL
+      maxSeries: 1000 
