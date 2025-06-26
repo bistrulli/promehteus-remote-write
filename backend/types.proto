@@ -2,13 +2,17 @@ syntax = "proto3";
 
 package prometheus;
 
+option go_package = "prompb";
+
 message WriteRequest {
     repeated TimeSeries timeseries = 1;
+    repeated MetricMetadata metadata = 3;
 }
 
 message TimeSeries {
     repeated Label labels = 1;
     repeated Sample samples = 2;
+    repeated Exemplar exemplars = 3;
 }
 
 message Label {
@@ -19,4 +23,27 @@ message Label {
 message Sample {
     double value = 1;
     int64 timestamp = 2;
+}
+
+message Exemplar {
+    repeated Label labels = 1;
+    double value = 2;
+    int64 timestamp = 3;
+}
+
+message MetricMetadata {
+    enum MetricType {
+        UNKNOWN = 0;
+        COUNTER = 1;
+        GAUGE = 2;
+        HISTOGRAM = 3;
+        GAUGEHISTOGRAM = 4;
+        SUMMARY = 5;
+        INFO = 6;
+        STATE_SET = 7;
+    }
+    MetricType type = 1;
+    string metric_family_name = 2;
+    string help = 4;
+    string unit = 5;
 } 

@@ -24,19 +24,26 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0btypes.proto\x12\nprometheus\":\n\x0cWriteRequest\x12*\n\ntimeseries\x18\x01 \x03(\x0b\x32\x16.prometheus.TimeSeries\"T\n\nTimeSeries\x12!\n\x06labels\x18\x01 \x03(\x0b\x32\x11.prometheus.Label\x12#\n\x07samples\x18\x02 \x03(\x0b\x32\x12.prometheus.Sample\"$\n\x05Label\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\"*\n\x06Sample\x12\r\n\x05value\x18\x01 \x01(\x01\x12\x11\n\ttimestamp\x18\x02 \x01(\x03\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0btypes.proto\x12\nprometheus\"h\n\x0cWriteRequest\x12*\n\ntimeseries\x18\x01 \x03(\x0b\x32\x16.prometheus.TimeSeries\x12,\n\x08metadata\x18\x03 \x03(\x0b\x32\x1a.prometheus.MetricMetadata\"}\n\nTimeSeries\x12!\n\x06labels\x18\x01 \x03(\x0b\x32\x11.prometheus.Label\x12#\n\x07samples\x18\x02 \x03(\x0b\x32\x12.prometheus.Sample\x12\'\n\texemplars\x18\x03 \x03(\x0b\x32\x14.prometheus.Exemplar\"$\n\x05Label\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\"*\n\x06Sample\x12\r\n\x05value\x18\x01 \x01(\x01\x12\x11\n\ttimestamp\x18\x02 \x01(\x03\"O\n\x08\x45xemplar\x12!\n\x06labels\x18\x01 \x03(\x0b\x32\x11.prometheus.Label\x12\r\n\x05value\x18\x02 \x01(\x01\x12\x11\n\ttimestamp\x18\x03 \x01(\x03\"\xf9\x01\n\x0eMetricMetadata\x12\x33\n\x04type\x18\x01 \x01(\x0e\x32%.prometheus.MetricMetadata.MetricType\x12\x1a\n\x12metric_family_name\x18\x02 \x01(\t\x12\x0c\n\x04help\x18\x04 \x01(\t\x12\x0c\n\x04unit\x18\x05 \x01(\t\"z\n\nMetricType\x12\x0b\n\x07UNKNOWN\x10\x00\x12\x0b\n\x07\x43OUNTER\x10\x01\x12\t\n\x05GAUGE\x10\x02\x12\r\n\tHISTOGRAM\x10\x03\x12\x12\n\x0eGAUGEHISTOGRAM\x10\x04\x12\x0b\n\x07SUMMARY\x10\x05\x12\x08\n\x04INFO\x10\x06\x12\r\n\tSTATE_SET\x10\x07\x42\x08Z\x06prompbb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'types_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
-  DESCRIPTOR._loaded_options = None
+  _globals['DESCRIPTOR']._loaded_options = None
+  _globals['DESCRIPTOR']._serialized_options = b'Z\006prompb'
   _globals['_WRITEREQUEST']._serialized_start=27
-  _globals['_WRITEREQUEST']._serialized_end=85
-  _globals['_TIMESERIES']._serialized_start=87
-  _globals['_TIMESERIES']._serialized_end=171
-  _globals['_LABEL']._serialized_start=173
-  _globals['_LABEL']._serialized_end=209
-  _globals['_SAMPLE']._serialized_start=211
-  _globals['_SAMPLE']._serialized_end=253
+  _globals['_WRITEREQUEST']._serialized_end=131
+  _globals['_TIMESERIES']._serialized_start=133
+  _globals['_TIMESERIES']._serialized_end=258
+  _globals['_LABEL']._serialized_start=260
+  _globals['_LABEL']._serialized_end=296
+  _globals['_SAMPLE']._serialized_start=298
+  _globals['_SAMPLE']._serialized_end=340
+  _globals['_EXEMPLAR']._serialized_start=342
+  _globals['_EXEMPLAR']._serialized_end=421
+  _globals['_METRICMETADATA']._serialized_start=424
+  _globals['_METRICMETADATA']._serialized_end=673
+  _globals['_METRICMETADATA_METRICTYPE']._serialized_start=551
+  _globals['_METRICMETADATA_METRICTYPE']._serialized_end=673
 # @@protoc_insertion_point(module_scope)
