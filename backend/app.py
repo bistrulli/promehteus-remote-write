@@ -32,7 +32,8 @@ from datetime import datetime
 import os
 import struct
 import snappy
-from influxdb import InfluxDBClient
+from influxdb_client import InfluxDBClient as InfluxDBClientV2, Point, WriteOptions
+from influxdb_client.client.write_api import SYNCHRONOUS
 import types_pb2  # Importa il nostro file generato
 
 # Configurazione logging dettagliato per debugging
@@ -50,15 +51,19 @@ INFLUXDB_PORT = int(os.getenv('INFLUXDB_PORT', 8086))
 INFLUXDB_DATABASE = os.getenv('INFLUXDB_DATABASE', 'prometheus_metrics')
 INFLUXDB_USERNAME = os.getenv('INFLUXDB_USERNAME', 'admin')
 INFLUXDB_PASSWORD = os.getenv('INFLUXDB_PASSWORD', 'adminpassword')
+INFLUXDB_TOKEN = f"{INFLUXDB_USERNAME}:{INFLUXDB_PASSWORD}" # Token format for InfluxDB 1.8
 
-# Client InfluxDB
-influx_client = InfluxDBClient(
-    host=INFLUXDB_HOST,
-    port=INFLUXDB_PORT,
-    username=INFLUXDB_USERNAME,
-    password=INFLUXDB_PASSWORD,
-    database=INFLUXDB_DATABASE
+# --- NEW CLIENT SETUP ---
+# Client for InfluxDB 1.8+ with Flux
+# The org parameter is required but not used for 1.8, so it can be anything.
+influx_client_v2 = InfluxDBClientV2(
+    url=f"http://{INFLUXDB_HOST}:{INFLUXDB_PORT}",
+    token=INFLUXDB_TOKEN,
+    org="prometheus" 
 )
+
+write_api = influx_client_v2.write_api(write_options=SYNCHRONOUS)
+query_api = influx_client_v2.query_api()
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -68,9 +73,12 @@ def health_check():
     """
     try:
         # Test connessione InfluxDB
-        influx_client.ping()
-        influx_status = "healthy"
-        logger.info("Health check: InfluxDB connesso correttamente")
+        if influx_client_v2.health().status == "pass":
+             influx_status = "healthy"
+             logger.info("Health check: InfluxDB v2 client connected successfully")
+        else:
+             influx_status = "unhealthy"
+             logger.error("Health check: InfluxDB v2 client connection failed")
     except Exception as e:
         influx_status = f"error: {str(e)}"
         logger.error(f"Health check: Errore connessione InfluxDB - {str(e)}")
@@ -115,16 +123,18 @@ def receive_remote_write():
                         labels[label.name] = label.value
                 
                 for sample in ts.samples:
-                    point = {
-                        "measurement": metric_name,
-                        "tags": labels,
-                        "fields": {"value": sample.value},
-                        "time": datetime.fromtimestamp(sample.timestamp / 1000.0)
-                    }
+                    point = Point(metric_name) \
+                        .tag_from_dictionary(labels) \
+                        .field("value", sample.value) \
+                        .time(datetime.fromtimestamp(sample.timestamp / 1000.0))
                     influx_points.append(point)
 
             if influx_points:
-                influx_client.write_points(influx_points)
+                write_api.write(
+                    bucket=f"{INFLUXDB_DATABASE}/autogen", 
+                    org='-', # Not used in 1.8
+                    record=influx_points
+                )
             
             return jsonify({'status': 'success', 'metrics_received': len(influx_points)}), 200
 
@@ -170,7 +180,7 @@ def list_metrics():
     try:
         # Query per ottenere le ultime metriche di debug
         query = f"SELECT * FROM prometheus_remote_write_debug ORDER BY time DESC LIMIT 100"
-        result = influx_client.query(query)
+        result = query_api.query(query)
         
         metrics = []
         for point in result.get_points():
@@ -209,7 +219,7 @@ def query_metrics():
         measurement = request.args.get('measurement', 'prometheus_remote_write_debug')
         
         query = f"SELECT * FROM {measurement} ORDER BY time DESC LIMIT {limit}"
-        result = influx_client.query(query)
+        result = query_api.query(query)
         
         metrics = []
         for point in result.get_points():
@@ -237,24 +247,30 @@ def query_metrics():
 
 # --- Custom SYDA K8s Queries ---
 
-def _format_for_grafana(result, target_name):
+def _flux_format_for_grafana(result, target_name):
     """
-    Format InfluxDB result for Grafana SimpleJSON datasource (time series).
+    Format Flux query result for Grafana SimpleJSON datasource (time series).
     """
     series = []
-    # result.items() gives a tuple of ((measurement, tags), generator)
-    for (measurement, tags), points in result.items():
-        # Create a unique target name from measurement and tags
-        target_label = tags.get(target_name) if target_name and tags else measurement
-        
+    for table in result:
+        # Each table can be a different series in Grafana
+        if not table.records:
+            continue
+
+        # Determine the target name for this series
+        if target_name and target_name in table.records[0].values:
+             target_label = table.records[0].values[target_name]
+        else:
+             # Fallback if target_name is not a tag, use measurement
+             target_label = table.records[0].get_measurement()
+
         datapoints = []
-        for point in points:
+        for record in table.records:
             # Grafana expects [value, timestamp_ms]
-            value = point.get('value')
-            if value is not None:
-                # Convert timestamp string to epoch milliseconds
-                time_dt = datetime.strptime(point['time'], '%Y-%m-%dT%H:%M:%SZ')
-                timestamp_ms = int(time_dt.timestamp() * 1000)
+            value = record.get_value()
+            time = record.get_time()
+            if value is not None and time is not None:
+                timestamp_ms = int(time.timestamp() * 1000)
                 datapoints.append([value, timestamp_ms])
         
         if datapoints:
@@ -267,33 +283,29 @@ def _format_for_grafana(result, target_name):
 @app.route('/query/arrivals', methods=['GET'])
 def query_arrivals():
     """
-    Calculates arrival rate based on istio_requests_total.
-    PromQL: sum(increase(istio_requests_total{...}[{window}s]))/{window}
+    Calculates arrival rate based on istio_requests_total using Flux.
     """
     deployment_name = request.args.get('deployment', '.*')
     namespace = request.args.get('namespace', 'default')
     window = request.args.get('window', '1m')
     group_interval = request.args.get('interval', '10s')
 
-    query = f"""
-        SELECT sum("rate") as value
-        FROM (
-            SELECT NON_NEGATIVE_DERIVATIVE(mean("value"), 1s) as rate
-            FROM "istio_requests_total"
-            WHERE "destination_workload" =~ /^{deployment_name}/
-              AND "destination_workload_namespace" = '{namespace}'
-              AND "reporter" = 'destination'
-              AND time > now() - {window}
-            GROUP BY time({group_interval}), "destination_workload"
-        )
-        WHERE time > now() - {window}
-        GROUP BY time({group_interval})
+    flux_query = f"""
+        from(bucket: "{INFLUXDB_DATABASE}/autogen")
+          |> range(start: -{window})
+          |> filter(fn: (r) => r._measurement == "istio_requests_total")
+          |> filter(fn: (r) => r.destination_workload_namespace == "{namespace}")
+          |> filter(fn: (r) => r.reporter == "destination")
+          |> filter(fn: (r) => r.destination_workload =~ /^{deployment_name}/)
+          |> derivative(unit: 1s, nonNegative: true)
+          |> aggregateWindow(every: {group_interval}, fn: sum, createEmpty: false)
+          |> yield(name: "sum")
     """
     
     try:
-        logger.info(f"Executing arrivals query: {query.strip()}")
-        result = influx_client.query(query)
-        grafana_data = _format_for_grafana(result, None)
+        logger.info(f"Executing Flux arrivals query: {flux_query.strip()}")
+        result = query_api.query(flux_query)
+        grafana_data = _flux_format_for_grafana(result, None)
         return jsonify(grafana_data)
     except Exception as e:
         logger.error(f"Error executing arrivals query: {e}", exc_info=True)
@@ -302,8 +314,7 @@ def query_arrivals():
 @app.route('/query/completions', methods=['GET'])
 def query_completions():
     """
-    Calculates completion rate based on istio_requests_total for a given response_code.
-    PromQL: sum(increase(istio_requests_total{...,response_code="{code}"}[{window}s]))/{window}
+    Calculates completion rate based on istio_requests_total for a given response_code using Flux.
     """
     deployment_name = request.args.get('deployment', '.*')
     namespace = request.args.get('namespace', 'default')
@@ -311,26 +322,23 @@ def query_completions():
     group_interval = request.args.get('interval', '10s')
     response_code = request.args.get('response_code', '200')
 
-    query = f"""
-        SELECT sum("rate") as value
-        FROM (
-            SELECT NON_NEGATIVE_DERIVATIVE(mean("value"), 1s) as rate
-            FROM "istio_requests_total"
-            WHERE "destination_workload" =~ /^{deployment_name}/
-              AND "destination_workload_namespace" = '{namespace}'
-              AND "reporter" = 'destination'
-              AND "response_code" = '{response_code}'
-              AND time > now() - {window}
-            GROUP BY time({group_interval}), "destination_workload"
-        )
-        WHERE time > now() - {window}
-        GROUP BY time({group_interval})
+    flux_query = f"""
+        from(bucket: "{INFLUXDB_DATABASE}/autogen")
+          |> range(start: -{window})
+          |> filter(fn: (r) => r._measurement == "istio_requests_total")
+          |> filter(fn: (r) => r.destination_workload_namespace == "{namespace}")
+          |> filter(fn: (r) => r.reporter == "destination")
+          |> filter(fn: (r) => r.response_code == "{response_code}")
+          |> filter(fn: (r) => r.destination_workload =~ /^{deployment_name}/)
+          |> derivative(unit: 1s, nonNegative: true)
+          |> aggregateWindow(every: {group_interval}, fn: sum, createEmpty: false)
+          |> yield(name: "sum")
     """
 
     try:
-        logger.info(f"Executing completions query: {query.strip()}")
-        result = influx_client.query(query)
-        grafana_data = _format_for_grafana(result, None)
+        logger.info(f"Executing Flux completions query: {flux_query.strip()}")
+        result = query_api.query(flux_query)
+        grafana_data = _flux_format_for_grafana(result, None)
         return jsonify(grafana_data)
     except Exception as e:
         logger.error(f"Error executing completions query: {e}", exc_info=True)
@@ -339,72 +347,42 @@ def query_completions():
 @app.route('/query/response_time', methods=['GET'])
 def query_response_time():
     """
-    Calculates response time.
-    PromQL: sum(rate(istio_request_duration_milliseconds_sum{...})) / sum(rate(istio_request_duration_milliseconds_count{...})) / 1000
+    Calculates response time using Flux.
     """
     deployment_name = request.args.get('deployment', '.*')
     namespace = request.args.get('namespace', 'default')
     window = request.args.get('window', '1m')
     group_interval = request.args.get('interval', '10s')
 
-    base_query = """
-        SELECT sum("rate") as value
-        FROM (
-            SELECT NON_NEGATIVE_DERIVATIVE(mean("value"), 1s) as rate
-            FROM "{measurement}"
-            WHERE "destination_workload" =~ /^{deployment_name}/
-              AND "destination_workload_namespace" = '{namespace}'
-              AND time > now() - {window}
-            GROUP BY time({group_interval}), "destination_workload"
-        )
-        WHERE time > now() - {window}
-        GROUP BY time({group_interval})
+    flux_query = f"""
+        sum_data = from(bucket: "{INFLUXDB_DATABASE}/autogen")
+          |> range(start: -{window})
+          |> filter(fn: (r) => r._measurement == "istio_request_duration_milliseconds_sum")
+          |> filter(fn: (r) => r.destination_workload_namespace == "{namespace}")
+          |> filter(fn: (r) => r.destination_workload =~ /^{deployment_name}/)
+          |> derivative(unit: 1s, nonNegative: true)
+          |> aggregateWindow(every: {group_interval}, fn: sum)
+          
+        count_data = from(bucket: "{INFLUXDB_DATABASE}/autogen")
+          |> range(start: -{window})
+          |> filter(fn: (r) => r._measurement == "istio_request_duration_milliseconds_count")
+          |> filter(fn: (r) => r.destination_workload_namespace == "{namespace}")
+          |> filter(fn: (r) => r.destination_workload =~ /^{deployment_name}/)
+          |> derivative(unit: 1s, nonNegative: true)
+          |> aggregateWindow(every: {group_interval}, fn: sum)
+
+        join(tables: {{sum: sum_data, count: count_data}}, on: ["_time", "_start", "_stop"])
+          |> map(fn: (r) => ({{
+              _time: r._time,
+              _value: if r._value_count > 0.0 then r._value_sum / r._value_count / 1000.0 else 0.0
+          }}))
+          |> yield(name: "response_time")
     """
-    
-    query_sum = base_query.format(
-        measurement="istio_request_duration_milliseconds_sum",
-        deployment_name=deployment_name,
-        namespace=namespace,
-        window=window,
-        group_interval=group_interval
-    )
-    query_count = base_query.format(
-        measurement="istio_request_duration_milliseconds_count",
-        deployment_name=deployment_name,
-        namespace=namespace,
-        window=window,
-        group_interval=group_interval
-    )
 
     try:
-        logger.info("Executing response_time (sum) query")
-        result_sum_set = influx_client.query(query_sum)
-        
-        logger.info("Executing response_time (count) query")
-        result_count_set = influx_client.query(query_count)
-
-        # Process results and calculate the final value
-        # We expect one series from each for the overall sum
-        sum_points = list(result_sum_set.get_points()) if result_sum_set else []
-        count_points = list(result_count_set.get_points()) if result_count_set else []
-        
-        # Create a dictionary for quick lookup of count values by time
-        counts_by_time = {p['time']: p['value'] for p in count_points}
-        
-        datapoints = []
-        for p_sum in sum_points:
-            time = p_sum['time']
-            sum_val = p_sum['value']
-            count_val = counts_by_time.get(time)
-
-            if sum_val is not None and count_val is not None and count_val > 0:
-                # Calculate response time and convert from ms to seconds
-                final_value = (sum_val / count_val) / 1000.0
-                time_dt = datetime.strptime(time, '%Y-%m-%dT%H:%M:%SZ')
-                timestamp_ms = int(time_dt.timestamp() * 1000)
-                datapoints.append([final_value, timestamp_ms])
-        
-        grafana_data = [{"target": "response_time", "datapoints": datapoints}]
+        logger.info(f"Executing Flux response_time query: {flux_query.strip()}")
+        result = query_api.query(flux_query)
+        grafana_data = _flux_format_for_grafana(result, None)
         return jsonify(grafana_data)
 
     except Exception as e:
@@ -414,34 +392,32 @@ def query_response_time():
 @app.route('/query/cpu_usage', methods=['GET'])
 def query_cpu_usage():
     """
-    Calculates CPU usage rate per pod.
-    PromQL: sum(rate(container_cpu_usage_seconds_total{...}[{window}s])) by (pod)
+    Calculates CPU usage rate per pod using Flux.
     """
     deployment_name = request.args.get('deployment', '.*')
     namespace = request.args.get('namespace', 'default')
     window = request.args.get('window', '1m')
     group_interval = request.args.get('interval', '10s')
 
-    query = f"""
-        SELECT sum("rate") as value
-        FROM (
-            SELECT NON_NEGATIVE_DERIVATIVE(mean("value"), 1s) as rate
-            FROM "container_cpu_usage_seconds_total"
-            WHERE "pod" =~ /^{deployment_name}/
-              AND "namespace" = '{namespace}'
-              AND "container" != 'POD' AND "container" != ''
-              AND time > now() - {window}
-            GROUP BY time({group_interval}), "pod"
-        )
-        WHERE time > now() - {window}
-        GROUP BY time({group_interval}), "pod"
+    flux_query = f"""
+        from(bucket: "{INFLUXDB_DATABASE}/autogen")
+          |> range(start: -{window})
+          |> filter(fn: (r) => r._measurement == "container_cpu_usage_seconds_total")
+          |> filter(fn: (r) => r.namespace == "{namespace}")
+          |> filter(fn: (r) => r.pod =~ /^{deployment_name}/)
+          |> filter(fn: (r) => r.container != "POD" and r.container != "")
+          |> derivative(unit: 1s, nonNegative: true)
+          |> group(columns: ["pod", "_time"])
+          |> sum()
+          |> aggregateWindow(every: {group_interval}, fn: mean, createEmpty: false)
+          |> yield(name: "cpu_usage")
     """
     
     try:
-        logger.info(f"Executing cpu_usage query: {query.strip()}")
-        result = influx_client.query(query)
+        logger.info(f"Executing Flux cpu_usage query: {flux_query.strip()}")
+        result = query_api.query(flux_query)
         # Group results by pod name for the target label
-        grafana_data = _format_for_grafana(result, 'pod')
+        grafana_data = _flux_format_for_grafana(result, 'pod')
         return jsonify(grafana_data)
     except Exception as e:
         logger.error(f"Error executing cpu_usage query: {e}", exc_info=True)
@@ -450,28 +426,30 @@ def query_cpu_usage():
 @app.route('/query/replicas', methods=['GET'])
 def query_replicas():
     """
-    Counts the number of active pods (replicas).
-    PromQL: count(sum(rate(container_cpu_usage_seconds_total{...}[{window}s])) by (pod))
+    Counts the number of active pods (replicas) using Flux.
     """
     deployment_name = request.args.get('deployment', '.*')
     namespace = request.args.get('namespace', 'default')
     window = request.args.get('window', '1m')
     group_interval = request.args.get('interval', '10s')
 
-    query = f"""
-        SELECT count(distinct("pod")) as value
-        FROM "container_cpu_usage_seconds_total"
-        WHERE "pod" =~ /^{deployment_name}/
-          AND "namespace" = '{namespace}'
-          AND "container" != 'POD' AND "container" != ''
-          AND time > now() - {window}
-        GROUP BY time({group_interval})
+    flux_query = f"""
+        from(bucket: "{INFLUXDB_DATABASE}/autogen")
+          |> range(start: -{window})
+          |> filter(fn: (r) => r._measurement == "container_cpu_usage_seconds_total")
+          |> filter(fn: (r) => r.namespace == "{namespace}")
+          |> filter(fn: (r) => r.pod =~ /^{deployment_name}/)
+          |> filter(fn: (r) => r.container != "POD" and r.container != "")
+          |> group(columns: ["pod"])
+          |> distinct(column: "pod")
+          |> aggregateWindow(every: {group_interval}, fn: count, createEmpty: false)
+          |> yield(name: "replicas")
     """
     
     try:
-        logger.info(f"Executing replicas query: {query.strip()}")
-        result = influx_client.query(query)
-        grafana_data = _format_for_grafana(result, None)
+        logger.info(f"Executing Flux replicas query: {flux_query.strip()}")
+        result = query_api.query(flux_query)
+        grafana_data = _flux_format_for_grafana(result, None)
         return jsonify(grafana_data)
     except Exception as e:
         logger.error(f"Error executing replicas query: {e}", exc_info=True)
