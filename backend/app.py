@@ -97,42 +97,58 @@ def receive_remote_write():
         else:
             raw_data = request.data
         
-        # Usa il nostro parser generato
-        write_request = types_pb2.WriteRequest()
-        write_request.ParseFromString(raw_data)
-        
-        influx_points = []
-        for ts in write_request.timeseries:
-            metric_name = ""
-            labels = {}
-            for label in ts.labels:
-                if label.name == "__name__":
-                    metric_name = label.value
-                else:
-                    labels[label.name] = label.value
+        # Tenta di parsare, ma con un logging degli errori molto più dettagliato
+        try:
+            write_request = types_pb2.WriteRequest()
+            write_request.ParseFromString(raw_data)
             
-            for sample in ts.samples:
-                point = {
-                    "measurement": metric_name,
-                    "tags": labels,
-                    "fields": {
-                        "value": sample.value
-                    },
-                    "time": datetime.fromtimestamp(sample.timestamp / 1000.0)
-                }
-                influx_points.append(point)
+            # Se il parsing ha successo, procedi come prima
+            influx_points = []
+            for ts in write_request.timeseries:
+                metric_name = ""
+                labels = {}
+                for label in ts.labels:
+                    if label.name == "__name__":
+                        metric_name = label.value
+                    else:
+                        labels[label.name] = label.value
+                
+                for sample in ts.samples:
+                    point = {
+                        "measurement": metric_name,
+                        "tags": labels,
+                        "fields": {"value": sample.value},
+                        "time": datetime.fromtimestamp(sample.timestamp / 1000.0)
+                    }
+                    influx_points.append(point)
 
-        if influx_points:
-            influx_client.write_points(influx_points)
-            logger.info(f"Salvati {len(influx_points)} punti in InfluxDB dal remote write.")
+            if influx_points:
+                influx_client.write_points(influx_points)
+            
+            return jsonify({'status': 'success', 'metrics_received': len(influx_points)}), 200
 
-        return jsonify({'status': 'success', 'metrics_received': len(influx_points)}), 200
-        
+        except Exception as e:
+            # Errore nel parsing: log dettagliato e salvataggio del payload
+            logger.error(f"DETAILED PARSE ERROR: {e}", exc_info=True)
+            
+            # Salva il payload grezzo in un file per l'analisi
+            payload_filename = f"payload_error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.bin"
+            with open(payload_filename, "wb") as f:
+                f.write(raw_data)
+            logger.info(f"Payload grezzo salvato in: {payload_filename}")
+
+            # Rispondi con un errore 500
+            return jsonify({
+                'status': 'error', 
+                'message': 'Failed to parse Protobuf message.',
+                'error_details': str(e)
+            }), 500
+            
     except Exception as e:
-        logger.error(f"ERRORE durante il processing della metrica: {str(e)}")
+        logger.error(f"ERRORE GENERICO nel processing: {str(e)}", exc_info=True)
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': 'Generic error during request processing.'
         }), 500
 
 @app.route('/api/v1/write', methods=['POST'])
