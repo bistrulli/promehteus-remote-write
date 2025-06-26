@@ -302,13 +302,14 @@ def query_arrivals():
 @app.route('/query/completions', methods=['GET'])
 def query_completions():
     """
-    Calculates completion rate based on istio_requests_total with response_code 200.
-    PromQL: sum(increase(istio_requests_total{...,response_code="200"}[{window}s]))/{window}
+    Calculates completion rate based on istio_requests_total for a given response_code.
+    PromQL: sum(increase(istio_requests_total{...,response_code="{code}"}[{window}s]))/{window}
     """
     deployment_name = request.args.get('deployment', '.*')
     namespace = request.args.get('namespace', 'default')
     window = request.args.get('window', '1m')
     group_interval = request.args.get('interval', '10s')
+    response_code = request.args.get('response_code', '200')
 
     query = f"""
         SELECT sum("rate") as value
@@ -318,7 +319,7 @@ def query_completions():
             WHERE "destination_workload" =~ /^{deployment_name}/
               AND "destination_workload_namespace" = '{namespace}'
               AND "reporter" = 'destination'
-              AND "response_code" = '200'
+              AND "response_code" = '{response_code}'
               AND time > now() - {window}
             GROUP BY time({group_interval}), "destination_workload"
         )
