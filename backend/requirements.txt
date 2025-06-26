@@ -4,7 +4,7 @@ influxdb-client
 python-snappy==0.7.3
 gunicorn==21.2.0
 prometheus-client==0.17.1
-protobuf==4.25.3
+protobuf==5.26.1
 python-dateutil==2.8.2
 pytest==7.4.2
 pytest-flask==1.2.0
