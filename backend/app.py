@@ -91,8 +91,9 @@ def receive_remote_write():
     Endpoint principale per ricevere metriche da Prometheus remote write
     """
     try:
-        # Decomprimi i dati se necessario (Prometheus usa Snappy)
-        if 'snappy' in request.content_type.lower():
+        # Decomprimi i dati se necessario (Prometheus usa Snappy via Content-Encoding)
+        content_encoding = request.headers.get('Content-Encoding', '').lower()
+        if 'snappy' in content_encoding:
             raw_data = snappy.uncompress(request.data)
         else:
             raw_data = request.data
