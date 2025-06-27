@@ -100,7 +100,6 @@ cleanup_files() {
     print_status "Cleaning up local files..."
     
     # Remove generated files
-    rm -f prometheus-config-patched.yaml
     rm -f prometheus-loadbalancer.yaml
     
     print_success "Local files cleaned up"

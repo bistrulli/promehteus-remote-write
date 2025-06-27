@@ -171,7 +171,7 @@ data:
 
     # Remote write configuration
     remote_write:
-      - url: "{{BACKEND_URL}}"
+      - url: "{{BACKEND_URL}}/api/v1/write"
         remote_timeout: 30s
         write_relabel_configs:
           # Export only specific metrics for SYDA K8s monitoring

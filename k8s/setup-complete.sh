@@ -108,7 +108,7 @@ configure_prometheus_remote_write() {
     print_status "Configuring Prometheus remote write..."
     
     # Create a temporary file with the placeholder replaced
-    BACKEND_URL="http://your-backend-url:5000/receive"
+    BACKEND_URL="http://your-victoriametrics-host:8428"
     
     # Replace placeholder in the template file
     sed "s|{{BACKEND_URL}}|$BACKEND_URL|g" prometheus-config-patched.yaml > prometheus-config-temp.yaml
@@ -175,7 +175,7 @@ update_backend_url() {
     if [ -z "$new_url" ]; then
         print_error "Please provide a backend URL"
         echo "Usage: $0 update-backend <backend-url>"
-        echo "Example: $0 update-backend http://my-backend:5000/receive"
+        echo "Example: $0 update-backend http://my-victoriametrics-host:8428"
         exit 1
     fi
     
@@ -236,12 +236,10 @@ show_next_steps() {
     echo "   kubectl logs -l app.kubernetes.io/name=prometheus -n $NAMESPACE -f"
     echo ""
     echo "3. Update backend URL when ready:"
-    echo "   ./setup-complete.sh update-backend http://your-actual-backend:5000/receive"
+    echo "   ./setup-complete.sh update-backend http://your-actual-victoriametrics-host:8428"
     echo ""
     echo "4. Manual update (alternative):"
     echo "   Edit prometheus-config-patched.yaml and change {{BACKEND_URL}}"
-    echo "   Then run: kubectl apply -f prometheus-config-patched.yaml"
-    echo "   And restart: kubectl rollout restart deployment/prometheus -n $NAMESPACE"
     echo ""
     echo "============================================================================="
 }

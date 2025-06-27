@@ -1,18 +1,16 @@
 version: '3.8'
 
 services:
-  # InfluxDB per il backend
-  influxdb:
-    image: influxdb:1.8
-    container_name: influxdb-backend
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:latest
+    container_name: victoriametrics
     ports:
-      - "8086:8086"
-    environment:
-      - INFLUXDB_DB=prometheus_metrics
-      - INFLUXDB_ADMIN_USER=admin
-      - INFLUXDB_ADMIN_PASSWORD=adminpassword
+      - "8428:8428"
     volumes:
-      - influxdb_data:/var/lib/influxdb
+      - victoriametrics_data:/victoria-metrics-data
+    command:
+      - '--storageDataPath=/victoria-metrics-data'
+      - '--retentionPeriod=1y'
     restart: unless-stopped
     networks:
       - monitoring_network
@@ -34,10 +32,10 @@ services:
     networks:
       - monitoring_network
     depends_on:
-      - influxdb
+      - victoriametrics
 
 volumes:
-  influxdb_data:
+  victoriametrics_data:
   grafana_data:
 
 networks:
